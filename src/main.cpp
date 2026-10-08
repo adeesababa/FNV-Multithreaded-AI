@@ -88,7 +88,7 @@ struct Settings {
 	int summarySeconds = 10;      // [Advanced] LogSummarySeconds: how often the log gets a line of numbers (0 = never)
 	bool noHelpers = false;       // [Advanced] NoHelpers: diagnostic, no helper threads (the batches run on the AI thread alone)
 	bool pickLock = false;        // [Advanced] PickLock: diagnostic, line-of-sight ray casts one at a time
-	bool checkLock = false;       // [Advanced] CheckLock: diagnostic, each whole check one at a time (still on the helper threads)
+	int checkLock = 0;            // [Advanced] CheckLock: diagnostic, 1 = each whole check one at a time (still on the helper threads), 2 = all but its line of sight
 };
 static Settings Config;
 
@@ -127,7 +127,7 @@ static std::string ReadSettings(HMODULE self) {
 		else if (key == "Advanced.LogSummarySeconds") Config.summarySeconds = std::max(0, (int)d);
 		else if (key == "Advanced.NoHelpers") Config.noHelpers = b;
 		else if (key == "Advanced.PickLock") Config.pickLock = b;
-		else if (key == "Advanced.CheckLock") Config.checkLock = b;
+		else if (key == "Advanced.CheckLock") Config.checkLock = std::max(0, std::min(2, (int)d));
 	}
 	fclose(f);
 	return ini;

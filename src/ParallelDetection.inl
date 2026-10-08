@@ -115,8 +115,27 @@ namespace Parallel {
 	static volatile LONG Phase;           // 1 = collect each NPC's checks, 2 = run the checks
 	static SRWLOCK BatchLock = SRWLOCK_INIT;
 
-	// [Advanced] CheckLock (diagnostic): each whole check one at a time, still on whichever thread takes it.
+	// [Advanced] CheckLock (diagnostic): 1 = each whole check one at a time, still on whichever thread takes it; 2 = the same
+	// except its line-of-sight part (Actor::LineOfSight, called at 0x008A0FB1: thiscall(ecx = this NPC, 1, target, 1, &type,
+	// 1), ret 0x14, result in al), which the threads run at the same time (SightOutsideLock).
 	static SRWLOCK CheckLockS = SRWLOCK_INIT;
+	static __declspec(thread) int HoldsCheckLock;
+	static const UInt32 kSightSite = 0x008A0FB1, kLineOfSight = 0x0088B880;
+	typedef UInt8(__thiscall* SightFn)(void* self, int a1, void* target, int a3, int* a4, int a5);
+	static SightFn OrigSight = (SightFn)kLineOfSight;
+	static volatile LONGLONG WinSightTicks;
+	static UInt8 __fastcall SightOutsideLock(void* self, void*, int a1, void* target, int a3, int* a4, int a5) {
+		const UInt64 t0 = __rdtsc();
+		UInt8 r;
+		if (HoldsCheckLock) {
+			ReleaseSRWLockExclusive(&CheckLockS);
+			r = OrigSight(self, a1, target, a3, a4, a5);
+			AcquireSRWLockExclusive(&CheckLockS);
+		}
+		else r = OrigSight(self, a1, target, a3, a4, a5);
+		InterlockedExchangeAdd64(&WinSightTicks, (LONGLONG)(__rdtsc() - t0));
+		return r;
+	}
 	static void RunJobs() {
 		for (;;) {
 			const LONG i = InterlockedIncrement(&NextJob) - 1;
@@ -125,9 +144,9 @@ namespace Parallel {
 			const UInt64 t0 = __rdtsc();
 			j.seen = 0;                               // the loop clears its 'seen' byte before the call (0x008E48C3)
 			j.selfInCombatOut = j.selfInCombatIn;
-			if (Config.checkLock) AcquireSRWLockExclusive(&CheckLockS);
+			if (Config.checkLock) { AcquireSRWLockExclusive(&CheckLockS); HoldsCheckLock = 1; }
 			j.level = OrigGetLevel(j.self, 1, j.target, &j.seen, j.targetInCombat, 0, j.a6, &j.selfInCombatOut);
-			if (Config.checkLock) ReleaseSRWLockExclusive(&CheckLockS);
+			if (Config.checkLock) { HoldsCheckLock = 0; ReleaseSRWLockExclusive(&CheckLockS); }
 			j.ticks = __rdtsc() - t0;
 		}
 	}
@@ -446,6 +465,8 @@ namespace Parallel {
 			{ 0x004C8CC1, "6A016A006A008B4DE4", "worn-item fix-up: arguments (0, 0, 1)" },
 			{ 0x004BE570, "C20C00", "ItemChange::SetWorn: ret 0xC" },
 			{ 0x0088C163, "508B0D10EA1D01", "line-of-sight pick: arguments (pick data, ecx = TES)" },
+			{ 0x008A0FA2, "516A018B550C526A018B8D68FFFFFF", "line-of-sight call: arguments (1, target, 1, &type, 1; ecx = this NPC)" },
+			{ 0x0088C23D, "C21400", "Actor::LineOfSight: ret 0x14" },
 			{ 0x00458438, "C20400", "TES::HavokPick: ret 4" },
 		};
 		// the ShouldRunCombatDetection call the batch filter copies
@@ -655,6 +676,11 @@ namespace Parallel {
 			LogLine("PARALLEL DETECTION: REFUSED, a call to ProcessLists::RunDetectionForAllActors (008C7F84 / 008C7CA6) goes elsewhere: another plugin patched it");
 			return;
 		}
+		if (Config.checkLock == 2) {
+			if (RedirectCall(kSightSite, kLineOfSight, (void*)SightOutsideLock)) LogLine("PARALLEL DETECTION: CheckLock = 2 (diagnostic): checks one at a time except their line of sight");
+			else LogLine("PARALLEL DETECTION note: CheckLock 2 could not wrap the line-of-sight call (008A0FB1 goes elsewhere); whole checks are locked");
+		}
+		else if (Config.checkLock == 1) LogLine("PARALLEL DETECTION: CheckLock = 1 (diagnostic): whole checks one at a time");
 		if (Config.pickLock) {
 			if (RedirectCall(kPickSite, kHavokPick, (void*)LockedPick)) LogLine("PARALLEL DETECTION: PickLock = 1 (diagnostic): line-of-sight ray casts run one at a time");
 			else LogLine("PARALLEL DETECTION note: PickLock could not be set (0088C16A goes elsewhere); ray casts stay parallel");
@@ -719,6 +745,8 @@ namespace Parallel {
 		if (cross || tooSmall || noEntry || different || unused || outside || jobs != answered)
 			LogLine("PARALLEL DETECTION details: whole-pass batches %.2f/frame covering %.1f NPCs each | single-NPC runs too small or swimming %.1f, checks computed %.1f, not asked for by the game %.1f, asked but not in the batch %.1f, arguments differed %.1f /frame | NPC runs outside the detection pass (followers etc., left to the game) %.2f/frame",
 				cross / f, cross ? double(crossSelves) / cross : 0.0, tooSmall / f, jobs / f, unused / f, noEntry / f, different / f, outside / f);
+		const LONGLONG sight = InterlockedExchange64(&WinSightTicks, 0);
+		if (sight) LogLine("PARALLEL DETECTION line of sight (CheckLock 2): %.3f ms/frame of the checks' time", double(sight) / TicksPerMs / f);
 		const LONG fixups = InterlockedExchange(&WinFixups, 0), fixupsOnWorkers = InterlockedExchange(&WinFixupsOnWorkers, 0);
 		if (fixups)
 			LogLine("PARALLEL DETECTION worn-item fix-ups (GetWornItem deletes a worn entry of an item; the unsafe write, now one thread at a time): %ld in %zu frames, %ld of them on detection workers",
