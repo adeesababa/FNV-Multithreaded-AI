@@ -189,6 +189,18 @@ namespace Parallel {
 		ReleaseSRWLockExclusive(&ArmorLock);
 		return r;
 	}
+	// [Advanced] PickLock (diagnostic): the check's line-of-sight ray cast (Actor::LineOfSight -> TES::HavokPick at
+	// 0x0088C16A, thiscall(ecx = TES, pick data), ret 4) one thread at a time, for every caller.
+	static SRWLOCK PickLock = SRWLOCK_INIT;
+	static const UInt32 kPickSite = 0x0088C16A, kHavokPick = 0x00458420;
+	typedef void* (__thiscall* PickFn)(void* tes, void* pickData);
+	static PickFn OrigPick = (PickFn)kHavokPick;
+	static void* __fastcall LockedPick(void* tes, void*, void* pickData) {
+		AcquireSRWLockExclusive(&PickLock);
+		void* r = OrigPick(tes, pickData);
+		ReleaseSRWLockExclusive(&PickLock);
+		return r;
+	}
 	// GetWornItem's fix-up (0x004C8CCA: ItemChange::SetWorn(0, 0, 1), ret 0xC): counted only, every caller passes through
 	typedef void(__thiscall* SetWornFn)(void* item, int worn, int left, int remove);
 	static SetWornFn OrigSetWorn = (SetWornFn)kItemSetWorn;
@@ -310,7 +322,7 @@ namespace Parallel {
 	typedef void(__thiscall* RunFn)(void*, void*, float);
 	static RunFn OrigRun = (RunFn)0x008E40D0;
 	static void __fastcall RunHook(void* process, void*, UInt8* actor, float t) {
-		if (Ready && Level && WorkerCount && actor && actor != *(UInt8**)PlayerPtrAddress) {
+		if (Ready && Level && (WorkerCount || Config.noHelpers) && actor && actor != *(UInt8**)PlayerPtrAddress) {
 			if (!InPass) InterlockedIncrement(&WinOutside);   // e.g. a follower's run on AI thread 1: the game's, one by one
 			else if (TryAcquireSRWLockExclusive(&BatchLock)) {
 				NewFrameCheck();
@@ -429,6 +441,8 @@ namespace Parallel {
 			{ 0x00891BCF, "C20400", "Actor::GetArmorBeingWorn: ret 4" },
 			{ 0x004C8CC1, "6A016A006A008B4DE4", "worn-item fix-up: arguments (0, 0, 1)" },
 			{ 0x004BE570, "C20C00", "ItemChange::SetWorn: ret 0xC" },
+			{ 0x0088C163, "508B0D10EA1D01", "line-of-sight pick: arguments (pick data, ecx = TES)" },
+			{ 0x00458438, "C20400", "TES::HavokPick: ret 4" },
 		};
 		// the ShouldRunCombatDetection call the batch filter copies
 		{
@@ -567,6 +581,7 @@ namespace Parallel {
 			"MTAI Detection 5", "MTAI Detection 6", "MTAI Detection 7", "MTAI Detection 8", "MTAI Detection 9",
 			"MTAI Detection 10", "MTAI Detection 11", "MTAI Detection 12", "MTAI Detection 13", "MTAI Detection 14", "MTAI Detection 15" };
 		SYSTEM_INFO si; GetSystemInfo(&si);
+		if (Config.noHelpers) { LogLine("PARALLEL DETECTION: NoHelpers = 1 (diagnostic): no helper threads; the batches run on the AI thread alone"); return; }
 		// the main thread and the two AI threads keep their cores; past 8 the gain is small and each worker takes a Havok slot.
 		// A CPU with 3 or fewer threads gets none (the game's own threads already fill it): detection runs as before.
 		int want = Config.parThreads > 0 ? Config.parThreads : std::min(kDefaultMaxWorkers, (int)si.dwNumberOfProcessors - 3);
@@ -635,6 +650,10 @@ namespace Parallel {
 		if (!WrapPassSite(0x008C7F84, (void*)PassAI2, &PrevPassAI2) || !WrapPassSite(0x008C7CA6, (void*)PassCombined, &PrevPassCombined)) {
 			LogLine("PARALLEL DETECTION: REFUSED, a call to ProcessLists::RunDetectionForAllActors (008C7F84 / 008C7CA6) goes elsewhere: another plugin patched it");
 			return;
+		}
+		if (Config.pickLock) {
+			if (RedirectCall(kPickSite, kHavokPick, (void*)LockedPick)) LogLine("PARALLEL DETECTION: PickLock = 1 (diagnostic): line-of-sight ray casts run one at a time");
+			else LogLine("PARALLEL DETECTION note: PickLock could not be set (0088C16A goes elsewhere); ray casts stay parallel");
 		}
 		if (!RedirectCall(kFixupSite, kItemSetWorn, (void*)CountFixup))
 			LogLine("PARALLEL DETECTION note: the worn-item fix-up call (004C8CCA) goes elsewhere; it is not counted");
