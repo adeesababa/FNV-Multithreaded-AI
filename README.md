@@ -104,3 +104,7 @@ Offline tests (no game needed): `tests\run_offline_test.ps1`.
 - [xNVSE](https://github.com/xNVSE/NVSE) team, for the plugin API.
 - **WallSoGB**, for the IDA Pro database / symbol map of the game, which this work's reverse engineering relies on.
 - Part of the work on [NVR Unofficial Optimized](https://github.com/adeesababa/NVR-Unofficial-Optimized).
+
+## License
+
+GPL-3.0 (see [LICENSE](LICENSE)). Provided as is, without warranty of any kind.

@@ -611,10 +611,17 @@ namespace Parallel {
 		return true;
 	}
 
-	// points the call at 'site' (call ProcessLists::RunDetectionForAllActors) at 'wrap'
+	// points the call at 'site' (call ProcessLists::RunDetectionForAllActors) at 'wrap'. When another plugin already took
+	// that call (its target lies outside the game's code), the wrapper chains onto it: InPass is only a flag set around
+	// whatever runs the pass, and every batch answer is still matched to its exact NPC, target and arguments.
 	static bool WrapPassSite(UInt32 site, void* wrap, PassFn* prev) {
-		*prev = (PassFn)kRunAllActors;
-		return RedirectCall(site, kRunAllActors, wrap);
+		UInt8* p = (UInt8*)site;
+		if (p[0] != 0xE8) return false;
+		const UInt32 target = site + 5 + *(int*)(p + 1);
+		if (target != kRunAllActors && target >= 0x00401000 && target < 0x00FDF000) return false;   // elsewhere in the game: refuse
+		*prev = (PassFn)target;
+		if (target != kRunAllActors) LogLine("PARALLEL DETECTION note: the call at %08X already goes to %s (%08X, another plugin); chained onto it", site, ModuleOf(target).c_str(), target);
+		return RedirectCall(site, target, wrap);
 	}
 
 	// after the pair hook is in (InstallPairs)
