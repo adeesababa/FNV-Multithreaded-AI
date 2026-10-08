@@ -5,11 +5,12 @@ crowds of NPCs stop freezing the game when they notice each other.
 
 > [!WARNING]
 > **This is an experimental plugin. It may crash or freeze your game.**
-> - **Do not use it with saves you care about.** Back up your saves before trying it.
+> - **Back up your saves first, and don't try it on a playthrough you care about.** The plugin adds nothing of its own
+>   to your saves, so uninstalling it is clean. But while it runs, a bug in it can crash the game or damage the game's
+>   data in memory, and if the game saves at that moment, the damage goes into that save. Uninstalling won't repair it.
 > - It has been tested on one PC only. Earlier builds crashed in very big fights with human NPCs (250+ at The Fort).
 >   The cause was narrowed down and this build avoids it, and it ran clean in that same fight, but it has not been
 >   tested long enough to call it stable.
-> - Removing it is always safe: it **writes nothing to your saves**. Delete the DLL and the game is exactly as before.
 
 ## What it does
 
