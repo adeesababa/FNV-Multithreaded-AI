@@ -128,8 +128,21 @@ namespace Parallel {
 	typedef UInt8(__thiscall* SightFn)(void* self, int a1, void* target, int a3, int* a4, int a5);
 	static SightFn OrigSight = (SightFn)kLineOfSight;
 	static volatile LONGLONG WinSightTicks;
+	// line-of-sight self-check: how often line of sight answers 'visible' in the game's own checks (bucket 0), in the batch
+	// on the AI thread (1) and in the batch on the helpers (2); 1 and 2 get the same mix of pairs (jobs go to whichever
+	// thread is free), so their rates should match. [Advanced] VerifySight also records a sample of the batch's calls and
+	// re-runs them on the AI thread right after the batch (VerifySightSamples), counting the answers that differ.
+	static __declspec(thread) int IsWorker;   // a detection worker thread
+	static __declspec(thread) int InJobs;     // this thread is running batch checks (RunJobs)
+	static volatile LONG WinSightN[3], WinSightYes[3];
+	struct SightSample { void* self; void* target; int a1, a3, a5, typeIn, typeOut; UInt8 r, onWorker; };
+	static const int kSightSamples = 16;
+	static SightSample SightSamples[kSightSamples];
+	static volatile LONG SightSampleTick, SightSampleCount;
+	static volatile LONG WinVerify[2], WinVerifyDiff[2], WinVerifyTypeDiff[2];
 	static UInt8 __fastcall SightOutsideLock(void* self, void*, int a1, void* target, int a3, int* a4, int a5) {
 		const UInt64 t0 = __rdtsc();
+		const int typeIn = a4 ? *a4 : 0;
 		UInt8 r;
 		if (HoldsCheckLock) {
 			ReleaseSRWLockExclusive(&CheckLockS);
@@ -138,12 +151,33 @@ namespace Parallel {
 		}
 		else r = OrigSight(self, a1, target, a3, a4, a5);
 		InterlockedExchangeAdd64(&WinSightTicks, (LONGLONG)(__rdtsc() - t0));
+		const int bucket = !InJobs ? 0 : IsWorker ? 2 : 1;
+		InterlockedIncrement(&WinSightN[bucket]);
+		if (r) InterlockedIncrement(&WinSightYes[bucket]);
+		if (bucket && Config.verifySight && (InterlockedIncrement(&SightSampleTick) & 15) == 0) {
+			const LONG k = InterlockedIncrement(&SightSampleCount) - 1;
+			if (k < kSightSamples) SightSamples[k] = { self, target, a1, a3, a5, typeIn, a4 ? *a4 : 0, r, (UInt8)(IsWorker ? 1 : 0) };
+		}
 		return r;
 	}
+	// on the AI thread after the batch (the workers are done): the same calls again, the game's way, on the game's thread
+	static void VerifySightSamples() {
+		const LONG n = std::min((LONG)SightSampleCount, (LONG)kSightSamples);
+		SightSampleCount = 0;
+		for (LONG i = 0; i < n; i++) {
+			const SightSample& s = SightSamples[i];
+			int type = s.typeIn;
+			const UInt8 r = OrigSight(s.self, s.a1, s.target, s.a3, &type, s.a5);
+			InterlockedIncrement(&WinVerify[s.onWorker]);
+			if (!r != !s.r) InterlockedIncrement(&WinVerifyDiff[s.onWorker]);
+			if (type != s.typeOut) InterlockedIncrement(&WinVerifyTypeDiff[s.onWorker]);
+		}
+	}
 	static void RunJobs() {
+		InJobs = 1;
 		for (;;) {
 			const LONG i = InterlockedIncrement(&NextJob) - 1;
-			if (i >= JobEnd) return;
+			if (i >= JobEnd) { InJobs = 0; return; }
 			Job& j = Jobs[i];
 			const UInt64 t0 = __rdtsc();
 			j.seen = 0;                               // the loop clears its 'seen' byte before the call (0x008E48C3)
@@ -201,7 +235,6 @@ namespace Parallel {
 			CollectChecks(w, 0, true);
 		}
 	}
-	static __declspec(thread) int IsWorker;   // a detection worker thread (for the fix-up count)
 	static void __cdecl WorkerTask() { IsWorker = 1; if (Phase == 1) RunCollect(); else RunJobs(); }   // AILinearTaskThread::RunLinearTasks calls [this+0x4C]() each start
 
 	// the check's worn-armor lookup (0x008A107A: push 2; ecx = target; call Actor::GetArmorBeingWorn, ret 4), one at a time
@@ -284,6 +317,7 @@ namespace Parallel {
 		JobEnd = begin + count;
 		const int use = RunPool(2, count, 4);
 		const LONGLONG wall = (LONGLONG)(__rdtsc() - t0);
+		if (Config.verifySight) VerifySightSamples();
 		LONGLONG cpu = 0;
 		for (LONG i = begin; i < JobEnd; i++) cpu += (LONGLONG)Jobs[i].ticks;
 		InterlockedIncrement(&WinRuns);
@@ -752,6 +786,17 @@ namespace Parallel {
 				cross / f, cross ? double(crossSelves) / cross : 0.0, tooSmall / f, jobs / f, unused / f, noEntry / f, different / f, outside / f);
 		const LONGLONG sight = InterlockedExchange64(&WinSightTicks, 0);
 		if (sight) LogLine("PARALLEL DETECTION line of sight (in parallel): %.3f ms/frame of the checks' time", double(sight) / TicksPerMs / f);
+		LONG sn[3], sy[3];
+		for (int b = 0; b < 3; b++) { sn[b] = InterlockedExchange(&WinSightN[b], 0); sy[b] = InterlockedExchange(&WinSightYes[b], 0); }
+		auto pct = [](LONG y, LONG n) { return n ? 100.0 * y / n : 0.0; };
+		if (sn[0] || sn[1] || sn[2])
+			LogLine("PARALLEL DETECTION line of sight answers 'visible': game's own checks %.1f%% of %ld | batch on the AI thread %.1f%% of %ld | batch on helpers %.1f%% of %ld",
+				pct(sy[0], sn[0]), sn[0], pct(sy[1], sn[1]), sn[1], pct(sy[2], sn[2]), sn[2]);
+		LONG vn[2], vd[2], vt[2];
+		for (int b = 0; b < 2; b++) { vn[b] = InterlockedExchange(&WinVerify[b], 0); vd[b] = InterlockedExchange(&WinVerifyDiff[b], 0); vt[b] = InterlockedExchange(&WinVerifyTypeDiff[b], 0); }
+		if (vn[0] || vn[1])
+			LogLine("PARALLEL DETECTION VerifySight (same calls again on the AI thread after the batch): helpers' answers %ld re-run, %ld different (%ld other type) | AI thread's answers %ld re-run, %ld different (%ld other type)",
+				vn[1], vd[1], vt[1], vn[0], vd[0], vt[0]);
 		const LONG fixups = InterlockedExchange(&WinFixups, 0), fixupsOnWorkers = InterlockedExchange(&WinFixupsOnWorkers, 0);
 		if (fixups)
 			LogLine("PARALLEL DETECTION worn-item fix-ups (GetWornItem deletes a worn entry of an item; the unsafe write, now one thread at a time): %ld in %zu frames, %ld of them on detection workers",

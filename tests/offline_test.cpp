@@ -357,6 +357,15 @@ int main() {
 			for (auto& t : ts) t.join();
 			printf("line-of-sight lock: %d checks, rest of the check at most %d inside at once, line of sight up to %d at once\n", (int)sights, (int)maxLocked, (int)maxSight);
 			CHECK(sights == 800 && maxLocked == 1 && maxSight >= 2);
+			// VerifySight: batch calls on this thread are counted in bucket 1, every 16th is recorded and re-run the same way
+			Config.verifySight = true; P::SightSampleTick = 0; P::SightSampleCount = 0; P::WinSightN[1] = 0; P::WinSightYes[1] = 0;
+			P::InJobs = 1;
+			for (int i = 0; i < 64; i++) P::SightOutsideLock(&fs, nullptr, 1, (void*)0x1234, 1, &typeArg, 1);
+			P::InJobs = 0;
+			P::VerifySightSamples();
+			printf("line-of-sight self-check: %d batch calls, %d visible, %d re-run, %d different\n", (int)P::WinSightN[1], (int)P::WinSightYes[1], (int)P::WinVerify[0], (int)P::WinVerifyDiff[0]);
+			CHECK(P::WinSightN[1] == 64 && P::WinSightYes[1] == 64 && P::WinVerify[0] == 4 && P::WinVerifyDiff[0] == 0 && P::WinVerifyTypeDiff[0] == 0 && P::SightSampleCount == 0);
+			Config.verifySight = false;
 			Config.checkLock = keep;
 		}
 		P::Ready = false;

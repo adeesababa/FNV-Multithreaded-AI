@@ -88,6 +88,7 @@ struct Settings {
 	int summarySeconds = 10;      // [Advanced] LogSummarySeconds: how often the log gets a line of numbers (0 = never)
 	bool noHelpers = false;       // [Advanced] NoHelpers: diagnostic, no helper threads (the batches run on the AI thread alone)
 	bool pickLock = false;        // [Advanced] PickLock: diagnostic, line-of-sight ray casts one at a time
+	bool verifySight = false;     // [Advanced] VerifySight: diagnostic, re-runs a sample of the batch's line-of-sight calls on the AI thread and logs differences
 	int checkLock = 2;            // [Advanced] CheckLock: 2 = only each check's line of sight in parallel (default), 1 = whole checks one at a time, 0 = all in parallel (test only, crashed)
 };
 static Settings Config;
@@ -127,6 +128,7 @@ static std::string ReadSettings(HMODULE self) {
 		else if (key == "Advanced.LogSummarySeconds") Config.summarySeconds = std::max(0, (int)d);
 		else if (key == "Advanced.NoHelpers") Config.noHelpers = b;
 		else if (key == "Advanced.PickLock") Config.pickLock = b;
+		else if (key == "Advanced.VerifySight") Config.verifySight = b;
 		else if (key == "Advanced.CheckLock") Config.checkLock = std::max(0, std::min(2, (int)d));
 	}
 	fclose(f);
@@ -233,8 +235,8 @@ __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	Log = _fsopen((GameFolder() + "MultithreadedAI.log").c_str(), "w", _SH_DENYWR);
 	SYSTEMTIME t; GetLocalTime(&t);
 	LogLine("FNV Multithreaded AI %u (EXPERIMENTAL), started %04u-%02u-%02u %02u:%02u:%02u", kPluginVersion, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
-	LogLine("settings %s: Enabled %d, ScrollLockToggle %d, Threads %d (0 = automatic), MinChecks %d, SerialChecks %d, LogSummarySeconds %d, NoHelpers %d, PickLock %d, CheckLock %d",
-		settingsPath.c_str(), Config.parLevel, Config.parHotkey, Config.parThreads, Config.parMinJobs, Config.parSerialChecks, Config.summarySeconds, Config.noHelpers, Config.pickLock, Config.checkLock);
+	LogLine("settings %s: Enabled %d, ScrollLockToggle %d, Threads %d (0 = automatic), MinChecks %d, SerialChecks %d, LogSummarySeconds %d, NoHelpers %d, PickLock %d, CheckLock %d, VerifySight %d",
+		settingsPath.c_str(), Config.parLevel, Config.parHotkey, Config.parThreads, Config.parMinJobs, Config.parSerialChecks, Config.summarySeconds, Config.noHelpers, Config.pickLock, Config.checkLock, Config.verifySight);
 	PluginHandle = nvse->GetPluginHandle();
 	NVSEMessagingInterface* messaging = (NVSEMessagingInterface*)nvse->QueryInterface(kInterface_Messaging);
 	if (!messaging || !messaging->RegisterListener(PluginHandle, "NVSE", MessageHandler))
