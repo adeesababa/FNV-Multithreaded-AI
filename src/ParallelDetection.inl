@@ -115,6 +115,8 @@ namespace Parallel {
 	static volatile LONG Phase;           // 1 = collect each NPC's checks, 2 = run the checks
 	static SRWLOCK BatchLock = SRWLOCK_INIT;
 
+	// [Advanced] CheckLock (diagnostic): each whole check one at a time, still on whichever thread takes it.
+	static SRWLOCK CheckLockS = SRWLOCK_INIT;
 	static void RunJobs() {
 		for (;;) {
 			const LONG i = InterlockedIncrement(&NextJob) - 1;
@@ -123,7 +125,9 @@ namespace Parallel {
 			const UInt64 t0 = __rdtsc();
 			j.seen = 0;                               // the loop clears its 'seen' byte before the call (0x008E48C3)
 			j.selfInCombatOut = j.selfInCombatIn;
+			if (Config.checkLock) AcquireSRWLockExclusive(&CheckLockS);
 			j.level = OrigGetLevel(j.self, 1, j.target, &j.seen, j.targetInCombat, 0, j.a6, &j.selfInCombatOut);
+			if (Config.checkLock) ReleaseSRWLockExclusive(&CheckLockS);
 			j.ticks = __rdtsc() - t0;
 		}
 	}
