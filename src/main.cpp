@@ -88,7 +88,7 @@ struct Settings {
 	int summarySeconds = 10;      // [Advanced] LogSummarySeconds: how often the log gets a line of numbers (0 = never)
 	bool noHelpers = false;       // [Advanced] NoHelpers: diagnostic, no helper threads (the batches run on the AI thread alone)
 	bool pickLock = false;        // [Advanced] PickLock: diagnostic, line-of-sight ray casts one at a time
-	int checkLock = 0;            // [Advanced] CheckLock: diagnostic, 1 = each whole check one at a time (still on the helper threads), 2 = all but its line of sight
+	int checkLock = 2;            // [Advanced] CheckLock: 2 = only each check's line of sight in parallel (default), 1 = whole checks one at a time, 0 = all in parallel (test only, crashed)
 };
 static Settings Config;
 

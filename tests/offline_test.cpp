@@ -296,6 +296,69 @@ int main() {
 			}
 			CHECK(espBefore == espAfter && itemSeen == &item && argsSeen[0] == 0 && argsSeen[1] == 0 && argsSeen[2] == 1 && P::WinFixups == 1);
 		}
+
+		// 1j. CheckLock 2: the line-of-sight wrapper is called the game's way (ecx = this NPC, push 5, callee pops 0x14, al =
+		// result) and passes everything through; the rest of each check never has two threads inside at once, while line of
+		// sight does run on several threads at the same time
+		{
+			static volatile LONG inLocked, maxLocked, inSight, maxSight, sights;
+			static int argsSeen[5]; static void* selfSeen; static void* targetSeen;
+			auto spin = [](double ms) { const UInt64 until = __rdtsc() + (UInt64)(ms * TicksPerMs); while (__rdtsc() < until) {} };
+			struct FakeSight {
+				__declspec(noinline) UInt8 __thiscall See(int a1, void* target, int a3, int* a4, int a5) {
+					const LONG n = InterlockedIncrement(&inSight);
+					if (n > maxSight) InterlockedExchange(&maxSight, n);
+					const UInt64 until = __rdtsc() + (UInt64)(0.05 * TicksPerMs);
+					while (__rdtsc() < until) {}
+					InterlockedDecrement(&inSight);
+					InterlockedIncrement(&sights);
+					selfSeen = this; targetSeen = target; argsSeen[0] = a1; argsSeen[1] = a3; argsSeen[2] = *a4; argsSeen[3] = a5;
+					return (UInt8)(a1 + a3 + a5 + 0x10);
+				}
+			};
+			auto see = &FakeSight::See; P::OrigSight = (P::SightFn)*(void**)&see;
+			static FakeSight fs; static int typeArg = 7;
+			const int keep = Config.checkLock;
+			Config.checkLock = 2;
+			// the call layout, outside any check (no lock held)
+			UInt8 r8 = 0; int espBefore = 0, espAfter = 0;
+			void* fn = (void*)P::SightOutsideLock; FakeSight* pfs = &fs; void* tgt = (void*)0x1234; int* pType = &typeArg;
+			__asm {
+				mov espBefore, esp
+				push 1
+				push pType
+				push 1
+				push tgt
+				push 1
+				mov ecx, pfs
+				call fn
+				mov r8, al
+				mov espAfter, esp
+			}
+			CHECK(espBefore == espAfter && r8 == 0x13 && selfSeen == &fs && targetSeen == (void*)0x1234 && argsSeen[0] == 1 && argsSeen[1] == 1 && argsSeen[2] == 7 && argsSeen[3] == 1);
+			// four threads, each check = locked part, line of sight, locked part
+			sights = 0;
+			auto locked = [&] {
+				const LONG n = InterlockedIncrement(&inLocked);
+				if (n > maxLocked) InterlockedExchange(&maxLocked, n);
+				spin(0.005);
+				InterlockedDecrement(&inLocked);
+			};
+			std::vector<std::thread> ts;
+			for (int t = 0; t < 4; t++) ts.emplace_back([&] {
+				for (int i = 0; i < 200; i++) {
+					P::LockCheck();
+					locked();
+					CHECK(P::SightOutsideLock(&fs, nullptr, 1, nullptr, 1, &typeArg, 1) == 0x13);
+					locked();
+					P::UnlockCheck();
+				}
+			});
+			for (auto& t : ts) t.join();
+			printf("line-of-sight lock: %d checks, rest of the check at most %d inside at once, line of sight up to %d at once\n", (int)sights, (int)maxLocked, (int)maxSight);
+			CHECK(sights == 800 && maxLocked == 1 && maxSight >= 2);
+			Config.checkLock = keep;
+		}
 		P::Ready = false;
 	}
 

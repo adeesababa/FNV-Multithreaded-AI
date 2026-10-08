@@ -6,8 +6,9 @@ crowds of NPCs stop freezing the game when they notice each other.
 > [!WARNING]
 > **This is an experimental plugin. It may crash or freeze your game.**
 > - **Do not use it with saves you care about.** Back up your saves before trying it.
-> - It has been tested on one PC only. Crashes have been seen during testing with very large crowds; the causes found
->   so far are fixed, but it has not been tested long enough to call it stable.
+> - It has been tested on one PC only. Earlier builds crashed in very big fights with human NPCs (250+ at The Fort).
+>   The cause was narrowed down and this build avoids it, and it ran clean in that same fight, but it has not been
+>   tested long enough to call it stable.
 > - Removing it is always safe: it **writes nothing to your saves**. Delete the DLL and the game is exactly as before.
 
 ## What it does
@@ -16,10 +17,15 @@ Every NPC near you regularly checks which other actors it can see (line-of-sight
 one after another on a single thread. With a few dozen NPCs that is fine; with hundreds (big battles, spawned hordes,
 crowd mods) it can take seconds per frame, and the game freezes.
 
-This plugin runs those same checks **at the same time on several CPU cores** and hands the results back to the game.
-Same checks, same inputs, same results: NPCs behave exactly as they would without it, just without the freeze.
+This plugin runs the slow part of those checks, the line-of-sight ray casts, **at the same time on several CPU cores**
+and hands the results back to the game. Same checks, same inputs, same results: NPCs behave exactly as they would
+without it, just without the freeze.
 
-Measured on the author's PC (Ryzen 7 9800X3D, 16 threads) with ~300 hostile feral ghouls, with an earlier test build:
+Measured on the author's PC (Ryzen 7 9800X3D, 16 threads, 8 helper threads):
+
+- **Big fight at The Fort (250+ human NPCs), this build:** at the peak, about 600 checks per frame took **23 ms**
+  instead of **203 ms** (8.7x faster).
+- **~300 hostile feral ghouls, an earlier test build:**
 
 | | Without | With the plugin |
 |---|---|---|
@@ -57,6 +63,9 @@ With a mod manager, install the zip like any other NVSE plugin.
 | `MinChecks` | `12` | A lone NPC's check run smaller than this is left to the game (not worth waking the helpers). |
 | `SerialChecks` | `0` | Diagnostic only: runs the checks one by one again (no speed-up). |
 | `LogSummarySeconds` | `10` | How often the log gets a line of numbers while it works. `0` = never. |
+| `CheckLock` | `2` | How much of each check runs in parallel. `2` = only line of sight (the slow part), the rest one at a time. `1` = whole checks one at a time (little speed-up). `0` = everything in parallel: **test only, this crashed** in big human fights. |
+| `NoHelpers` | `0` | Diagnostic only: no helper threads at all (no speed-up). For crash hunting. |
+| `PickLock` | `0` | Diagnostic only: the ray casts themselves run one at a time (less speed-up). For crash hunting. |
 
 ## If something goes wrong
 
@@ -84,6 +93,10 @@ with the plugin, please open an issue with:
   anything not in the batch is checked by the game as before.
 - Batches run only inside that detection pass. The game also runs detection elsewhere (for example for a leader's
   followers on the other AI thread, while physics may be updating); those calls are left to the game.
+- Only the line-of-sight part of each check (`Actor::LineOfSight`, about 99% of a check's time) runs on several threads
+  at once; the rest of each check runs one at a time under a lock. Running whole checks at once crashed in big fights
+  with human NPCs (Havok heightfield data overwritten); with whole checks one at a time, and with this mode, the same
+  fight ran clean.
 - One part of the check is not read-only: looking up the target's worn armor can delete an inventory entry in a rare
   case. That call is made one thread at a time.
 - Havok (the physics engine) has room for 32 threads in its memory system; the plugin always leaves 10 of them free.

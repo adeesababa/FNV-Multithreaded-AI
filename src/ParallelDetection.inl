@@ -115,11 +115,15 @@ namespace Parallel {
 	static volatile LONG Phase;           // 1 = collect each NPC's checks, 2 = run the checks
 	static SRWLOCK BatchLock = SRWLOCK_INIT;
 
-	// [Advanced] CheckLock (diagnostic): 1 = each whole check one at a time, still on whichever thread takes it; 2 = the same
-	// except its line-of-sight part (Actor::LineOfSight, called at 0x008A0FB1: thiscall(ecx = this NPC, 1, target, 1, &type,
-	// 1), ret 0x14, result in al), which the threads run at the same time (SightOutsideLock).
+	// [Advanced] CheckLock. 2 (default) = each check runs one at a time except its line-of-sight part (Actor::LineOfSight,
+	// called at 0x008A0FB1: thiscall(ecx = this NPC, 1, target, 1, &type, 1), ret 0x14, result in al), which the threads run
+	// at the same time (SightOutsideLock). Line of sight is ~99% of a check's time, so this keeps the speed-up. Running the
+	// rest at the same time too (0) crashed in big human fights (Havok heightfield data overwritten, 2026-10-08), while
+	// whole checks one at a time (1) and this mode (2) ran clean in the same fight. 1 = whole checks one at a time.
 	static SRWLOCK CheckLockS = SRWLOCK_INIT;
 	static __declspec(thread) int HoldsCheckLock;
+	static inline void LockCheck() { if (Config.checkLock) { AcquireSRWLockExclusive(&CheckLockS); HoldsCheckLock = 1; } }
+	static inline void UnlockCheck() { if (Config.checkLock) { HoldsCheckLock = 0; ReleaseSRWLockExclusive(&CheckLockS); } }
 	static const UInt32 kSightSite = 0x008A0FB1, kLineOfSight = 0x0088B880;
 	typedef UInt8(__thiscall* SightFn)(void* self, int a1, void* target, int a3, int* a4, int a5);
 	static SightFn OrigSight = (SightFn)kLineOfSight;
@@ -144,9 +148,9 @@ namespace Parallel {
 			const UInt64 t0 = __rdtsc();
 			j.seen = 0;                               // the loop clears its 'seen' byte before the call (0x008E48C3)
 			j.selfInCombatOut = j.selfInCombatIn;
-			if (Config.checkLock) { AcquireSRWLockExclusive(&CheckLockS); HoldsCheckLock = 1; }
+			LockCheck();
 			j.level = OrigGetLevel(j.self, 1, j.target, &j.seen, j.targetInCombat, 0, j.a6, &j.selfInCombatOut);
-			if (Config.checkLock) { HoldsCheckLock = 0; ReleaseSRWLockExclusive(&CheckLockS); }
+			UnlockCheck();
 			j.ticks = __rdtsc() - t0;
 		}
 	}
@@ -677,10 +681,11 @@ namespace Parallel {
 			return;
 		}
 		if (Config.checkLock == 2) {
-			if (RedirectCall(kSightSite, kLineOfSight, (void*)SightOutsideLock)) LogLine("PARALLEL DETECTION: CheckLock = 2 (diagnostic): checks one at a time except their line of sight");
-			else LogLine("PARALLEL DETECTION note: CheckLock 2 could not wrap the line-of-sight call (008A0FB1 goes elsewhere); whole checks are locked");
+			if (RedirectCall(kSightSite, kLineOfSight, (void*)SightOutsideLock)) LogLine("PARALLEL DETECTION: CheckLock = 2: each check's line of sight runs in parallel, the rest of it one at a time");
+			else LogLine("PARALLEL DETECTION note: the line-of-sight call (008A0FB1) goes elsewhere (another plugin); whole checks run one at a time (little speed-up)");
 		}
-		else if (Config.checkLock == 1) LogLine("PARALLEL DETECTION: CheckLock = 1 (diagnostic): whole checks one at a time");
+		else if (Config.checkLock == 1) LogLine("PARALLEL DETECTION: CheckLock = 1: whole checks one at a time (little speed-up)");
+		else LogLine("PARALLEL DETECTION: CheckLock = 0: whole checks in parallel (TEST ONLY: this crashed in big fights with human NPCs)");
 		if (Config.pickLock) {
 			if (RedirectCall(kPickSite, kHavokPick, (void*)LockedPick)) LogLine("PARALLEL DETECTION: PickLock = 1 (diagnostic): line-of-sight ray casts run one at a time");
 			else LogLine("PARALLEL DETECTION note: PickLock could not be set (0088C16A goes elsewhere); ray casts stay parallel");
@@ -746,7 +751,7 @@ namespace Parallel {
 			LogLine("PARALLEL DETECTION details: whole-pass batches %.2f/frame covering %.1f NPCs each | single-NPC runs too small or swimming %.1f, checks computed %.1f, not asked for by the game %.1f, asked but not in the batch %.1f, arguments differed %.1f /frame | NPC runs outside the detection pass (followers etc., left to the game) %.2f/frame",
 				cross / f, cross ? double(crossSelves) / cross : 0.0, tooSmall / f, jobs / f, unused / f, noEntry / f, different / f, outside / f);
 		const LONGLONG sight = InterlockedExchange64(&WinSightTicks, 0);
-		if (sight) LogLine("PARALLEL DETECTION line of sight (CheckLock 2): %.3f ms/frame of the checks' time", double(sight) / TicksPerMs / f);
+		if (sight) LogLine("PARALLEL DETECTION line of sight (in parallel): %.3f ms/frame of the checks' time", double(sight) / TicksPerMs / f);
 		const LONG fixups = InterlockedExchange(&WinFixups, 0), fixupsOnWorkers = InterlockedExchange(&WinFixupsOnWorkers, 0);
 		if (fixups)
 			LogLine("PARALLEL DETECTION worn-item fix-ups (GetWornItem deletes a worn entry of an item; the unsafe write, now one thread at a time): %ld in %zu frames, %ld of them on detection workers",
