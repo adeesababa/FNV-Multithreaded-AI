@@ -66,6 +66,7 @@ With a mod manager, install the zip like any other NVSE plugin.
 | `LogSummarySeconds` | `10` | How often the log gets a line of numbers while it works. `0` = never. |
 | `CheckLock` | `2` | How much of each check runs in parallel. `2` = only line of sight (the slow part), the rest one at a time. `1` = whole checks one at a time (little speed-up). `0` = everything in parallel: **test only, this crashed** in big human fights. |
 | `NoHelpers` | `0` | Diagnostic only: no helper threads at all (no speed-up). For crash hunting. |
+| `WaitForAIThread1` | `1` | Each batch waits until AI thread 1 has finished moving NPCs and their physics bodies this frame, so the parallel ray casts never overlap physics changes. Added after outdoor physics-step crashes in big fights (2026-10-11). `0` = no wait. |
 | `VerifySight` | `0` | Diagnostic only: re-runs a few line-of-sight answers on the game's own thread and logs any that differ. |
 | `PickLock` | `0` | Diagnostic only: the ray casts themselves run one at a time (less speed-up). For crash hunting. |
 

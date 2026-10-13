@@ -36,6 +36,7 @@ namespace Parallel {
 	static int Level;                    // on/off (Scroll Lock when ParallelDetectionScrollLockKey is set)
 	static bool Ready;                   // the pair hook is in and the loop's bytes are as checked
 	static bool KeyWasDown;
+	static __declspec(thread) int InAI2Pass;   // this thread is in AI thread 2's detection pass (two AI threads)
 	static __declspec(thread) int InPass;   // this thread is inside ProcessLists::RunDetectionForAllActors
 
 	// the game, as a table so the offline test can stand in for it
@@ -280,9 +281,44 @@ namespace Parallel {
 	static void GameStart(int i) { ((void(__thiscall*)(void*))0x008C9FB0)(Workers[i]); }   // BSLinearTaskThread::StartProcessingTasks
 	static void GameWait(int i) { ((void(__thiscall*)(void*))0x008C7490)(Workers[i]); }    // BSLinearTaskThread::WaitForCompletion
 
+	// WaitForAIThread1: AI thread 2's detection pass starts while AI thread 1 still runs its animation, movement, combat,
+	// magic and package updates (stages 1-6), which move Havok bodies and change the broadphase. The game's own pass is one
+	// ray cast at a time and mostly runs after that work; the batch casts on 9 threads in the first few ms, all inside it.
+	// Physics-step crashes at 00D0D7D8 (broadphase pairs) were only ever seen with parallel detection, so the batch waits
+	// for AI thread 1's stage 10 (set after UpdatePlayerFollowers, before AI thread 1 waits on AI thread 2: no deadlock).
+	static const UInt32 kAIThreadManager = 0x011DFA50;   // AILinearTaskThreadManager: [+0] thread 0 (AI thread 1), [+0x8C] its stage events
+	static bool (*WaitAI1)(LONGLONG& waited);            // null in the offline test
+	static bool WaitAI1Off;
+	static volatile LONG WinAI1Waits, WinAI1Late;
+	static volatile LONGLONG WinAI1WaitTicks, WinAI1WaitMax;
+	static bool GameWaitAI1(LONGLONG& waited) {
+		void** mgr = (void**)kAIThreadManager;
+		if (!mgr[0]) return false;   // one AI thread: nothing runs alongside
+		HANDLE* events = *(HANDLE**)(kAIThreadManager + 0x8C);
+		if (!events || !events[10]) return false;
+		const UInt64 t0 = __rdtsc();
+		const DWORD r = WaitForSingleObject(events[10], 50);
+		waited = (LONGLONG)(__rdtsc() - t0);
+		if (r == WAIT_TIMEOUT) {
+			WaitAI1Off = true;
+			LogLine("PARALLEL DETECTION: WaitForAIThread1: AI thread 1 did not reach stage 10 within 50 ms; the wait is off for this session");
+		}
+		return true;
+	}
+	static void MaybeWaitAI1() {
+		if (!Config.waitAI1 || !InAI2Pass || !WaitAI1 || WaitAI1Off) return;
+		LONGLONG waited = 0;
+		if (!WaitAI1(waited)) return;
+		InterlockedIncrement(&WinAI1Waits);
+		InterlockedExchangeAdd64(&WinAI1WaitTicks, waited);
+		if (waited > WinAI1WaitMax) WinAI1WaitMax = waited;
+		if (waited > (LONGLONG)(TicksPerMs * 0.05)) InterlockedIncrement(&WinAI1Late);   // AI thread 1 was still busy
+	}
+
 	static int RunPool(LONG phase, LONG items, int perThread) {
 		Phase = phase;
 		const int use = Config.parSerialChecks && phase == 2 ? 0 : std::min(WorkerCount, (int)(items / perThread));   // diagnostic: no worker runs the checks
+		if (phase == 2 && use > 0) MaybeWaitAI1();
 		for (int w = 0; w < use; w++) StartWorker(w);
 		if (phase == 1) RunCollect(); else RunJobs();
 		for (int w = 0; w < use; w++) WaitWorker(w);
@@ -399,7 +435,7 @@ namespace Parallel {
 	typedef void(__thiscall* PassFn)(void* processManager);
 	static const UInt32 kRunAllActors = 0x0096C330;
 	static PassFn PrevPassAI2 = (PassFn)kRunAllActors, PrevPassCombined = (PassFn)kRunAllActors;
-	static void __fastcall PassAI2(void* processManager) { InPass++; PrevPassAI2(processManager); InPass--; }
+	static void __fastcall PassAI2(void* processManager) { InPass++; InAI2Pass++; PrevPassAI2(processManager); InAI2Pass--; InPass--; }
 	static void __fastcall PassCombined(void* processManager) { InPass++; PrevPassCombined(processManager); InPass--; }
 
 	// RunDetection's call against the player (0x008E439C), from the whole-pass batch
@@ -671,6 +707,7 @@ namespace Parallel {
 			Workers[WorkerCount++] = t;
 		}
 		StartWorker = GameStart;
+		WaitAI1 = GameWaitAI1;
 		WaitWorker = GameWait;
 		LogLine("PARALLEL DETECTION: %d worker threads started (CPU has %u logical cores)", WorkerCount, (unsigned)si.dwNumberOfProcessors);
 	}
@@ -797,6 +834,10 @@ namespace Parallel {
 		if (vn[0] || vn[1])
 			LogLine("PARALLEL DETECTION VerifySight (same calls again on the AI thread after the batch): helpers' answers %ld re-run, %ld different (%ld other type) | AI thread's answers %ld re-run, %ld different (%ld other type)",
 				vn[1], vd[1], vt[1], vn[0], vd[0], vt[0]);
+		const LONG ai1Waits = InterlockedExchange(&WinAI1Waits, 0), ai1Late = InterlockedExchange(&WinAI1Late, 0);
+		const LONGLONG ai1Ticks = InterlockedExchange64(&WinAI1WaitTicks, 0), ai1Max = InterlockedExchange64(&WinAI1WaitMax, 0);
+		if (ai1Waits) LogLine("PARALLEL DETECTION WaitForAIThread1: %.2f waits/frame, %.1f%% of them for a still-busy AI thread 1, %.3f ms/frame waiting (longest %.2f ms)",
+			ai1Waits / f, 100.0 * ai1Late / ai1Waits, double(ai1Ticks) / TicksPerMs / f, double(ai1Max) / TicksPerMs);
 		const LONG fixups = InterlockedExchange(&WinFixups, 0), fixupsOnWorkers = InterlockedExchange(&WinFixupsOnWorkers, 0);
 		if (fixups)
 			LogLine("PARALLEL DETECTION worn-item fix-ups (GetWornItem deletes a worn entry of an item; the unsafe write, now one thread at a time): %ld in %zu frames, %ld of them on detection workers",
